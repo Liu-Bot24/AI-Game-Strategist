@@ -15,7 +15,7 @@ from PyQt6.QtWidgets import (
     QApplication, QMainWindow, QTabWidget, QWidget,
     QVBoxLayout, QHBoxLayout, QGridLayout, QLabel, QComboBox,
     QPushButton, QTextEdit, QLineEdit, QInputDialog, QMessageBox,
-    QMenuBar, QMenu
+    QMenuBar, QMenu, QCheckBox
 )
 from PyQt6.QtCore import Qt, QRect, QTimer, QThread, pyqtSignal, QObject, QSize
 from PyQt6.QtGui import QFont, QPixmap, QClipboard, QAction, QKeySequence, QIcon, QShortcut
@@ -58,6 +58,7 @@ class WinHotkeyWorker(QThread):
                                      wintypes.HWND, wintypes.UINT, wintypes.WPARAM, wintypes.LPARAM)
 
         self.WM_HOTKEY = 0x0312
+        self.MOD_ALT = 0x0001
         self.MOD_CONTROL = 0x0002
         self.VK_1 = 0x31
         self.VK_2 = 0x32
@@ -128,10 +129,10 @@ class WinHotkeyWorker(QThread):
             return
 
         # 注册热键到此隐藏窗口
-        if not user32.RegisterHotKey(self.hwnd, 101, self.MOD_CONTROL, self.VK_1):
-            print("RegisterHotKey(hwnd, Ctrl+1) 失败")
-        if not user32.RegisterHotKey(self.hwnd, 102, self.MOD_CONTROL, self.VK_2):
-            print("RegisterHotKey(hwnd, Ctrl+2) 失败")
+        if not user32.RegisterHotKey(self.hwnd, 101, self.MOD_ALT, self.VK_1):
+            print("RegisterHotKey(hwnd, Alt+1) 失败")
+        if not user32.RegisterHotKey(self.hwnd, 102, self.MOD_ALT, self.VK_2):
+            print("RegisterHotKey(hwnd, Alt+2) 失败")
 
         msg = wintypes.MSG()
         while user32.GetMessageW(ctypes.byref(msg), 0, 0, 0) != 0:
@@ -502,7 +503,7 @@ class MainWindow(QMainWindow):
         QTimer.singleShot(0, self.setup_hotkeys)
 
     def closeEvent(self, event):
-        """窗口关闭时自动保存配置并注销全局热键"""
+        """窗口关闭时注销全局热键"""
         try:
             # 停止消息窗口热键监听线程
             if hasattr(self, 'hotkey_worker') and self.hotkey_worker and self.hotkey_worker.isRunning():
@@ -511,10 +512,8 @@ class MainWindow(QMainWindow):
                 except Exception:
                     pass
                 self.hotkey_worker.wait(300)
-            # 保存当前的API配置
-            self.save_api_config()
         except Exception as e:
-            print(f"保存配置时出错: {e}")
+            print(f"清理资源时出错: {e}")
         finally:
             # 确保窗口正常关闭
             event.accept()
@@ -687,11 +686,14 @@ class MainWindow(QMainWindow):
             self.test_stt_button.setText("测试语音识别")
             self.test_stt_button.setEnabled(True)
 
-    def build_polish_prompt(self, ocr_result: str, user_context: str) -> list:
+    def build_polish_prompt(self, ocr_result: str, user_context: str, character_names: list) -> list:
         """构建内容整合润色的Prompt消息列表"""
         prompt_template = """# 角色与任务
 你是一位严谨的助理，负责整理对话记录。你的任务是经过思考后，将【原始对话】和【背景补充】两部分信息，整合成一段或数段通顺、连贯、适合存档的文本。
 **重要原则：** 【原始对话】内容来自截图，是绝对准确的基准。【背景补充】可能来自语音输入，其中或许存在错别字。你在整合时，必须以【原始对话】的上下文为准，去理解和修正【背景补充】中可能不通顺或错误的地方，最终输出一段完美的记录。请不要进行分析、评价或添加任何原始信息之外的内容。
+
+# 已知角色列表
+{character_names_list}
 
 ---
 # 原始对话 (可能包含画面场景)
@@ -704,8 +706,12 @@ class MainWindow(QMainWindow):
 ---
 # 整合后的记录文本："""
 
+        # 处理角色名列表
+        character_names_str = "、".join(character_names) if character_names else "暂无已知角色"
+
         # 填充模板
         filled_prompt = prompt_template.format(
+            character_names_list=character_names_str,
             ocr_result_text=ocr_result.strip() if ocr_result else "无",
             user_context_text=user_context.strip() if user_context else "无"
         )
@@ -719,6 +725,17 @@ class MainWindow(QMainWindow):
         ]
 
         return messages
+
+    def get_all_character_names(self) -> list:
+        """获取所有角色名列表的辅助方法"""
+        character_names = []
+        if hasattr(self, 'record_character_combo'):
+            for i in range(self.record_character_combo.count()):
+                item_text = self.record_character_combo.itemText(i)
+                # 过滤掉特殊选项
+                if item_text and item_text != "--- 创建新角色 ---" and item_text != self.NO_CHARACTER_NOTICE:
+                    character_names.append(item_text)
+        return character_names
 
     def run_content_polish(self):
         """运行内容整合润色"""
@@ -735,6 +752,9 @@ class MainWindow(QMainWindow):
                 QTimer.singleShot(3000, lambda: self.polish_status_label.setText(""))
                 return
 
+            # 获取已知角色名列表
+            character_names = self.get_all_character_names()
+
             # 检查对话API配置
             chat_provider = self.api_config.get("chat_provider", "硅基流动")
             provider_key = self.get_provider_key(chat_provider)
@@ -750,6 +770,8 @@ class MainWindow(QMainWindow):
                 endpoint = "https://api.siliconflow.cn/v1/chat/completions"
             elif chat_provider == "豆包":
                 endpoint = "https://ark.cn-beijing.volces.com/api/v3/chat/completions"
+            elif chat_provider == "Gemini":
+                endpoint = "https://generativelanguage.googleapis.com/v1beta/openai/chat/completions"
             else:
                 endpoint = ""
 
@@ -770,8 +792,8 @@ class MainWindow(QMainWindow):
                 self.chat_worker.terminate()
                 self.chat_worker.wait()
 
-            # 构建Prompt消息
-            messages = self.build_polish_prompt(ocr_result, user_context)
+            # 构建Prompt消息（传入角色名列表）
+            messages = self.build_polish_prompt(ocr_result, user_context, character_names)
 
             # 创建并启动对话工作线程
             self.chat_worker = ChatWorker(messages, api_key, endpoint, model)
@@ -931,8 +953,8 @@ class MainWindow(QMainWindow):
 
     def create_shortcuts(self):
         """创建应用程序级别的快捷键"""
-        # 创建 Ctrl+2 快捷键
-        self.fullscreen_shortcut = QShortcut(QKeySequence("Ctrl+2"), self)
+        # 创建 Alt+2 快捷键
+        self.fullscreen_shortcut = QShortcut(QKeySequence("Alt+2"), self)
         # 连接快捷键的 activated 信号到新的截图方法
         self.fullscreen_shortcut.activated.connect(self.capture_fullscreen_and_analyze)
 
@@ -955,7 +977,7 @@ class MainWindow(QMainWindow):
         self.screenshot_button.setIcon(QIcon(resource_path("assets", "icons", "screenshot.png")))
         self.screenshot_button.setIconSize(QSize(20, 20))
         self.screenshot_button.setFixedSize(40, 30)
-        self.screenshot_button.setShortcut("Ctrl+1")  # 恢复快捷键
+        self.screenshot_button.setShortcut("Alt+1")  # 恢复快捷键
         self.screenshot_button.setStyleSheet("""
             QPushButton {
                 font-size: 16px;
@@ -971,7 +993,7 @@ class MainWindow(QMainWindow):
                 background-color: #3a3a3a;
             }
         """)
-        self.screenshot_button.setToolTip("智能截图 (Ctrl+1)")
+        self.screenshot_button.setToolTip("智能截图 (Alt+1)")
         self.screenshot_button.clicked.connect(self.start_smart_screenshot)
         screenshot_layout.addWidget(self.screenshot_button)
 
@@ -1030,7 +1052,7 @@ class MainWindow(QMainWindow):
         # OCR结果显示区域
         ocr_header_layout = QHBoxLayout()
 
-        ocr_label = QLabel("📸 截图识别结果 (Ctrl+1 框选截图 | Ctrl+2 全屏截图)")
+        ocr_label = QLabel("📸 截图识别结果 (Alt+1 框选截图 | Alt+2 全屏截图)")
         ocr_label.setFont(QFont("Microsoft YaHei", 10, QFont.Weight.Bold))
         ocr_label.setStyleSheet("color: #4CAF50; margin-top: 10px;")
         ocr_header_layout.addWidget(ocr_label)
@@ -1046,7 +1068,7 @@ class MainWindow(QMainWindow):
 
         self.ocr_result_text = QTextEdit()
         self.ocr_result_text.setObjectName("ocr_result_text")
-        self.ocr_result_text.setPlaceholderText("截图识别出的文字将显示在这里...\n\n使用快捷键 Ctrl+1 或菜单中的「截图识别」开始截图。")
+        self.ocr_result_text.setPlaceholderText("截图识别出的文字将显示在这里...\n\n使用快捷键 Alt+1 或菜单中的「截图识别」开始截图。")
         self.ocr_result_text.setMaximumHeight(150)  # 限制高度
         layout.addWidget(self.ocr_result_text)
 
@@ -1099,6 +1121,7 @@ class MainWindow(QMainWindow):
 
         self.record_character_combo = QComboBox()
         self.record_character_combo.setObjectName("record_character_combo")
+        self.record_character_combo.activated.connect(self.on_record_character_combo_activated)
         record_layout.addWidget(self.record_character_combo)
 
         self.record_to_dossier_button = QPushButton("📋 记录到档案")
@@ -1130,7 +1153,7 @@ class MainWindow(QMainWindow):
         layout.addWidget(title_label)
 
         # 画面分析结果区域
-        analysis_label = QLabel("🖼️ 当前游戏画面分析 (Ctrl+1 框选截图 | Ctrl+2 全屏截图)")
+        analysis_label = QLabel("🖼️ 当前游戏画面分析 (Alt+1 框选截图 | Alt+2 全屏截图)")
         analysis_label.setFont(QFont("Microsoft YaHei", 10, QFont.Weight.Bold))
         analysis_label.setStyleSheet("color: #4CAF50; margin-top: 10px;")
         layout.addWidget(analysis_label)
@@ -1176,6 +1199,20 @@ class MainWindow(QMainWindow):
 
         layout.addLayout(char_layout)
 
+        # 全局分析模式复选框
+        self.include_all_chars_checkbox = QCheckBox("参考所有角色档案")
+        self.include_all_chars_checkbox.setFont(QFont("Microsoft YaHei", 9))
+        self.include_all_chars_checkbox.setStyleSheet("color: #9C27B0; margin-top: 10px;")
+        self.include_all_chars_checkbox.stateChanged.connect(self.on_include_all_chars_toggled)
+        layout.addWidget(self.include_all_chars_checkbox)
+
+        # tokens消耗提醒
+        tokens_warning_label = QLabel("💡 勾选后将分析所有角色档案，会消耗更多tokens，请根据API配置的模型情况选择")
+        tokens_warning_label.setFont(QFont("Microsoft YaHei", 8))
+        tokens_warning_label.setStyleSheet("color: #FF5722; margin-left: 20px; margin-bottom: 5px;")
+        tokens_warning_label.setWordWrap(True)
+        layout.addWidget(tokens_warning_label)
+
         # 补充说明区域
         supplement_label = QLabel("📝 补充说明")
         supplement_label.setFont(QFont("Microsoft YaHei", 10, QFont.Weight.Bold))
@@ -1220,11 +1257,25 @@ class MainWindow(QMainWindow):
         self.advice_result_text.setReadOnly(True)  # 设置为只读
         layout.addWidget(self.advice_result_text)
 
-        # 添加弹性空间
-        layout.addStretch()
-
         decision_widget.setLayout(layout)
         self.tab_widget.addTab(decision_widget, "抉择辅助")
+
+    def on_include_all_chars_toggled(self, state):
+        """处理全局分析模式复选框的状态变化"""
+        if state == Qt.CheckState.Checked.value:
+            # 勾选状态：禁用相关人下拉框并设置为"无"
+            self.related_person1_combo.setEnabled(False)
+            self.related_person2_combo.setEnabled(False)
+            self.related_person3_combo.setEnabled(False)
+
+            self.related_person1_combo.setCurrentText("无")
+            self.related_person2_combo.setCurrentText("无")
+            self.related_person3_combo.setCurrentText("无")
+        else:
+            # 未勾选状态：重新启用相关人下拉框
+            self.related_person1_combo.setEnabled(True)
+            self.related_person2_combo.setEnabled(True)
+            self.related_person3_combo.setEnabled(True)
 
     def get_decision_advice(self):
         """获取抉择建议的核心方法"""
@@ -1263,15 +1314,27 @@ class MainWindow(QMainWindow):
 
             # 读取相关人档案
             related_characters = []
-            for related_person in [related1, related2, related3]:
-                if related_person and related_person != "无" and related_person != self.NO_CHARACTER_NOTICE:
-                    related_characters.append(related_person)
-                    related_file = os.path.join(self.characters_dir, f"{related_person}.md")
-                    if os.path.exists(related_file):
-                        with open(related_file, 'r', encoding='utf-8') as f:
-                            character_profiles[related_person] = f.read()
-                    else:
-                        character_profiles[related_person] = "档案内容为空"
+
+            if self.include_all_chars_checkbox.isChecked():
+                # 全局分析模式：获取所有角色档案
+                related_characters = self.get_all_character_names()
+                # 从列表中移除提问者（避免重复）
+                if questioner in related_characters:
+                    related_characters.remove(questioner)
+            else:
+                # 普通模式：只读取指定的相关人
+                for related_person in [related1, related2, related3]:
+                    if related_person and related_person != "无" and related_person != self.NO_CHARACTER_NOTICE:
+                        related_characters.append(related_person)
+
+            # 读取相关角色的档案内容
+            for related_person in related_characters:
+                related_file = os.path.join(self.characters_dir, f"{related_person}.md")
+                if os.path.exists(related_file):
+                    with open(related_file, 'r', encoding='utf-8') as f:
+                        character_profiles[related_person] = f.read()
+                else:
+                    character_profiles[related_person] = "档案内容为空"
 
             # 第三步：Prompt构建
             messages = self.build_decision_prompt(
@@ -1294,6 +1357,8 @@ class MainWindow(QMainWindow):
                 endpoint = "https://api.siliconflow.cn/v1/chat/completions"
             elif chat_provider == "豆包":
                 endpoint = "https://ark.cn-beijing.volces.com/api/v3/chat/completions"
+            elif chat_provider == "Gemini":
+                endpoint = "https://generativelanguage.googleapis.com/v1beta/openai/chat/completions"
             else:
                 endpoint = ""
 
@@ -1531,7 +1596,7 @@ class MainWindow(QMainWindow):
         form_layout.addWidget(QLabel("提供商:"), 1, 0)
         self.multimodal_provider_combo = QComboBox()
         self.multimodal_provider_combo.setObjectName("multimodal_provider_combo")
-        self.multimodal_provider_combo.addItems(["硅基流动", "豆包", "自定义"])
+        self.multimodal_provider_combo.addItems(["硅基流动", "豆包", "Gemini", "自定义"])
         self.multimodal_provider_combo.currentTextChanged.connect(self.on_multimodal_provider_changed)
         form_layout.addWidget(self.multimodal_provider_combo, 1, 1, 1, 2)
 
@@ -1564,7 +1629,7 @@ class MainWindow(QMainWindow):
         form_layout.addWidget(QLabel("提供商:"), 6, 0)
         self.chat_provider_combo = QComboBox()
         self.chat_provider_combo.setObjectName("chat_provider_combo")
-        self.chat_provider_combo.addItems(["硅基流动", "豆包", "自定义"])
+        self.chat_provider_combo.addItems(["硅基流动", "豆包", "Gemini", "自定义"])
         self.chat_provider_combo.currentTextChanged.connect(self.on_chat_provider_changed)
         form_layout.addWidget(self.chat_provider_combo, 6, 1, 1, 2)
 
@@ -1695,52 +1760,56 @@ class MainWindow(QMainWindow):
             return "siliconflow"
         elif provider_name == "豆包":
             return "doubao"
+        elif provider_name == "Gemini":
+            return "gemini"
         else:
             return "custom"
 
     def on_multimodal_provider_changed(self, provider_name: str):
         """当多模态提供商改变时，加载对应配置"""
-        # 如果是用户操作导致的切换，先保存当前配置
-        if not self.multimodal_provider_combo.signalsBlocked():
-            self.save_current_multimodal_config()
-
         # 设置端点
         if provider_name == "硅基流动":
             self.multimodal_endpoint_edit.setText("https://api.siliconflow.cn/v1/chat/completions")
         elif provider_name == "豆包":
             self.multimodal_endpoint_edit.setText("https://ark.cn-beijing.volces.com/api/v3/chat/completions")
+        elif provider_name == "Gemini":
+            self.multimodal_endpoint_edit.setText("https://generativelanguage.googleapis.com/v1beta/openai/chat/completions")
         elif provider_name == "自定义":
             # 从配置加载自定义端点
             custom_config = self.api_config.get("custom", {})
             self.multimodal_endpoint_edit.setText(custom_config.get("multimodal_endpoint", ""))
+        else:
+            self.multimodal_endpoint_edit.setText("")
 
         # 加载对应提供商的配置
         provider_key = self.get_provider_key(provider_name)
         provider_config = self.api_config.get(provider_key, {})
 
+        # 只加载该供应商的配置，如果没有就显示空
         self.multimodal_api_key_edit.setText(provider_config.get("multimodal_api_key", ""))
         self.multimodal_model_edit.setText(provider_config.get("multimodal_model", ""))
 
     def on_chat_provider_changed(self, provider_name: str):
         """当对话提供商改变时，加载对应配置"""
-        # 如果是用户操作导致的切换，先保存当前配置
-        if not self.chat_provider_combo.signalsBlocked():
-            self.save_current_chat_config()
-
         # 设置端点
         if provider_name == "硅基流动":
             self.chat_endpoint_edit.setText("https://api.siliconflow.cn/v1/chat/completions")
         elif provider_name == "豆包":
             self.chat_endpoint_edit.setText("https://ark.cn-beijing.volces.com/api/v3/chat/completions")
+        elif provider_name == "Gemini":
+            self.chat_endpoint_edit.setText("https://generativelanguage.googleapis.com/v1beta/openai/chat/completions")
         elif provider_name == "自定义":
             # 从配置加载自定义端点
             custom_config = self.api_config.get("custom", {})
             self.chat_endpoint_edit.setText(custom_config.get("chat_endpoint", ""))
+        else:
+            self.chat_endpoint_edit.setText("")
 
         # 加载对应提供商的配置
         provider_key = self.get_provider_key(provider_name)
         provider_config = self.api_config.get(provider_key, {})
 
+        # 只加载该供应商的配置，如果没有就显示空
         self.chat_api_key_edit.setText(provider_config.get("chat_api_key", ""))
         self.chat_model_edit.setText(provider_config.get("chat_model", ""))
 
@@ -1843,6 +1912,9 @@ class MainWindow(QMainWindow):
             border-radius: 4px;
             padding: 5px;
         }
+        QComboBox QAbstractItemView {
+            min-width: 150px;
+        }
         QComboBox::drop-down {
             border: none;
         }
@@ -1901,6 +1973,9 @@ class MainWindow(QMainWindow):
                 if hasattr(self, 'record_character_combo'):
                     self.record_character_combo.clear()
                     self.record_character_combo.addItems(character_names)
+                    # 添加分隔线和创建新角色选项
+                    self.record_character_combo.insertSeparator(len(character_names))
+                    self.record_character_combo.addItem("--- 创建新角色 ---")
 
                 # 更新抉择辅助标签页的角色下拉框
                 if hasattr(self, 'questioner_combo'):
@@ -1928,7 +2003,8 @@ class MainWindow(QMainWindow):
                 self.character_combo.addItem(self.NO_CHARACTER_NOTICE)
                 if hasattr(self, 'record_character_combo'):
                     self.record_character_combo.clear()
-                    self.record_character_combo.addItem(self.NO_CHARACTER_NOTICE)
+                    # 无角色时只添加创建新角色选项，不添加"暂无角色档案"
+                    self.record_character_combo.addItem("--- 创建新角色 ---")
 
                 # 抉择辅助页面无角色时的处理
                 if hasattr(self, 'questioner_combo'):
@@ -1954,7 +2030,8 @@ class MainWindow(QMainWindow):
             self.character_combo.addItem(self.NO_CHARACTER_NOTICE)
             if hasattr(self, 'record_character_combo'):
                 self.record_character_combo.clear()
-                self.record_character_combo.addItem(self.NO_CHARACTER_NOTICE)
+                # 无角色时只添加创建新角色选项，不添加"暂无角色档案"
+                self.record_character_combo.addItem("--- 创建新角色 ---")
 
             # 抉择辅助页面无字符文件夹时的处理
             if hasattr(self, 'questioner_combo'):
@@ -1994,7 +2071,7 @@ class MainWindow(QMainWindow):
         else:
             self.dossier_text_edit.setPlainText("")
 
-    def create_new_character(self):
+    def create_new_character(self, return_new_name=False):
         """创建新角色"""
         # 1. 创建QInputDialog实例
         dialog = QInputDialog(self)
@@ -2044,7 +2121,7 @@ class MainWindow(QMainWindow):
 
             if os.path.exists(file_path):
                 self.show_message("创建失败", f"角色 '{character_name}' 已存在！", "warning")
-                return
+                return None if return_new_name else None
 
             try:
                 with open(file_path, 'w', encoding='utf-8') as file:
@@ -2058,8 +2135,38 @@ class MainWindow(QMainWindow):
 
                 self.show_message("创建成功", f"角色 '{character_name}' 创建成功！", "information")
 
+                # 根据参数返回角色名或None
+                return character_name if return_new_name else None
+
             except Exception as e:
                 self.show_message("创建失败", f"创建角色档案时出错: {str(e)}", "critical")
+                return None if return_new_name else None
+
+        # 用户取消或输入为空
+        return None if return_new_name else None
+
+    def on_record_character_combo_activated(self, index):
+        """处理速记台角色下拉框的选择事件"""
+        try:
+            selected_text = self.record_character_combo.itemText(index)
+
+            if selected_text == "--- 创建新角色 ---":
+                # 保存当前索引，以便取消时恢复
+                previous_index = self.record_character_combo.currentIndex()
+
+                # 调用创建新角色功能
+                new_character_name = self.create_new_character(return_new_name=True)
+
+                if new_character_name:
+                    # 创建成功，选中新角色
+                    new_index = self.record_character_combo.findText(new_character_name)
+                    if new_index >= 0:
+                        self.record_character_combo.setCurrentIndex(new_index)
+                else:
+                    # 用户取消或创建失败，恢复到之前保存的索引
+                    self.record_character_combo.setCurrentIndex(previous_index)
+        except Exception as e:
+            print(f"处理角色选择事件时出错: {str(e)}")
 
     def save_current_dossier(self):
         """保存当前修改"""
@@ -2245,6 +2352,8 @@ class MainWindow(QMainWindow):
                 endpoint = "https://api.siliconflow.cn/v1/chat/completions"
             elif multimodal_provider == "豆包":
                 endpoint = "https://ark.cn-beijing.volces.com/api/v3/chat/completions"
+            elif multimodal_provider == "Gemini":
+                endpoint = "https://generativelanguage.googleapis.com/v1beta/openai/chat/completions"
             else:
                 endpoint = ""
 
