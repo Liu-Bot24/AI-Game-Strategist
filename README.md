@@ -9,7 +9,7 @@
 - **全局截图热键**：
   - Ctrl+1 区域截图，弹出遮罩框选即可复制并触发后续流程；
   - Ctrl+2 直接抓取主屏，无需切换窗口；
-  - 通过隐藏消息窗口监听 WM_HOTKEY，即使程序在后台也能触发，窗口激活时仍保留普通快捷键兜底。
+  - 通过隐藏消息窗口监听 WM_HOTKEY，即使程序位于后台也能触发，窗口激活时仍保留普通快捷键作为兜底。
 - **语音输入与转写**：Shift 键切换录音状态，基于 PyAudio，将语音发送到配置的语音识别 API。
 - **角色档案与策略整理**：在“速记与整理台”中整合 OCR 文本、补充背景、生成结构化总结；角色档案页支持长期维护。
 - **灵活 API 配置**：在“API 设置”页填写多模态 / 语音接口参数（兼容 OpenAI 风格），所有配置保存在本地 config.json。
@@ -32,9 +32,8 @@
 
 1. （可选）创建并激活虚拟环境：
    `powershell
-   cd C:\Users\LQ\Desktop\0920
    python -m venv .venv
-   .venv\Scripts\activate
+   .\.venv\Scripts\activate
    `
 2. 安装项目所需库：
    `powershell
@@ -45,7 +44,6 @@
 ## 从源码运行
 
 `powershell
-cd C:\Users\LQ\Desktop\0920
 python main.py
 `
 
@@ -57,12 +55,10 @@ python main.py
 
 - **保留控制台日志（推荐，便于排错）**
   `powershell
-  cd C:\Users\LQ\Desktop\0920
   .\build_exe.bat
   `
 - **隐藏控制台（纯 GUI）**
   `powershell
-  cd C:\Users\LQ\Desktop\0920
   .\build_exe.bat gui
   `
 
@@ -79,7 +75,7 @@ esource_path() 以从 sys._MEIPASS 读取资源。
 
 ## 目录结构
 
-`
+ ```
 .
 ├── main.py                # 主程序入口，负责 UI 与全局热键
 ├── snipping_tool.py       # 自定义截图遮罩窗口
@@ -90,7 +86,7 @@ esource_path() 以从 sys._MEIPASS 读取资源。
 ├── screenshots/           # 截图输出目录（仅提交 .gitkeep）
 ├── build_exe.bat          # 一键打包脚本（仓库中唯一保留的 .bat）
 └── README.md              # 使用说明
-`
+ ```
 
 ## 快捷键一览
 
