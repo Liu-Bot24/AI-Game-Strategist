@@ -53,19 +53,19 @@ python main.py
 
 - **保留控制台日志（推荐，便于排错）**
   ```powershell
-  .&#92;build_exe.bat
+  .\build_exe.bat
   ```
 - **隐藏控制台（纯 GUI）**
   ```powershell
-  .&#92;build_exe.bat gui
+  .\build_exe.bat gui
   ```
 - **生成单文件 EXE**（所有依赖打包到一个可执行文件中）
   ```powershell
-  .&#92;build_exe.bat onefile
+  .\build_exe.bat onefile
   ```
 - **单文件 + 隐藏控制台**
   ```powershell
-  .&#92;build_exe.bat gui onefile
+  .\build_exe.bat gui onefile
   ```
 
 脚本会自动：
@@ -87,7 +87,7 @@ python main.py
 
 ## 目录结构
 
-`
+```
 .
 ├── main.py                # 主程序入口，负责 UI 与全局热键
 ├── snipping_tool.py       # 自定义截图遮罩窗口
@@ -98,7 +98,7 @@ python main.py
 ├── screenshots/           # 截图输出目录（仅提交 .gitkeep）
 ├── build_exe.bat          # 一键打包脚本（仓库中唯一保留的 .bat）
 └── README.md              # 使用说明
-`
+```
 
 ## 快捷键一览
 
