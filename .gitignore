@@ -1,0 +1,27 @@
+# ===== 仅推目录、忽略内容 =====
+characters/*
+!characters/.gitkeep
+
+screenshots/*
+!screenshots/.gitkeep
+
+# ===== 完全忽略 =====
+.claude/
+claude.md
+project_requirements.md
+config.json
+
+# ===== 常见 Python/系统忽略 =====
+__pycache__/
+*.py[cod]
+*.pyo
+*.pyd
+.venv/
+venv/
+ENV/
+*.egg-info/
+dist/
+build/
+.DS_Store
+Thumbs.db
+.vscode/
