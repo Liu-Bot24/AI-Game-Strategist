@@ -1,21 +1,19 @@
 # 互动游戏AI狗头军师 (AI-Game-Strategist)
 
+一款基于 PyQt6 的桌面助手，帮助玩家在游戏或直播过程中快速截图、整理笔记、记录角色档案，并通过自定义 API 进行 OCR / 多模态分析或语音转文字。适合“边玩边记录”“边分析边沟通”的使用场景。
+
 ![主界面截图](assets/readme/main_interface.png)
 
-一款面向“边玩边思考”的轻量工具：提供区域/全屏截图、语音转文字、简单的抉择辅助等能力，帮助你快速记录和整理游戏信息。
+## 功能亮点
 
----
-
-## 功能特性
-
-- 区域截图与全屏截图：
-  - Ctrl+1 区域截图（可在任意前台窗口或后台触发）
-  - Ctrl+2 全屏截图并直接进入分析
-- 语音转文字：Shift 键切换录音（基于 PyAudio）
-- 角色档案与笔记整理：支持记录角色信息、粘贴识别结果
-- 多模型/自定义 API：在“API 设置”页配置（兼容 OpenAI 风格接口）
-
-提示：全局热键采用 Windows 原生 WM_HOTKEY，在后台线程创建隐藏消息窗口统一监听；窗口内快捷键仍作为兜底存在。
+- **全局截图热键**：
+  - Ctrl+1 区域截图，弹出遮罩框选即可复制并触发后续流程；
+  - Ctrl+2 直接抓取主屏，无需切换窗口；
+  - 通过隐藏消息窗口监听 WM_HOTKEY，即使程序在后台也能触发，窗口激活时仍保留普通快捷键兜底。
+- **语音输入与转写**：Shift 键切换录音状态，基于 PyAudio，将语音发送到配置的语音识别 API。
+- **角色档案与策略整理**：在“速记与整理台”中整合 OCR 文本、补充背景、生成结构化总结；角色档案页支持长期维护。
+- **灵活 API 配置**：在“API 设置”页填写多模态 / 语音接口参数（兼容 OpenAI 风格），所有配置保存在本地 config.json。
+- **一键打包 EXE**：内置 uild_exe.bat，可一键生成带图标与资源的 Windows 可执行文件。
 
 ## 示例截图
 
@@ -23,49 +21,96 @@
 
 ![抉择辅助示例2](assets/readme/decision_support2.png)
 
-## 运行环境
+![抉择辅助示例2](assets/readme/decision_support3.png)
 
-- 系统：Windows 10/11
-- Python：3.8+（推荐 3.10+）
+## 环境要求
 
-安装依赖：
-```
-pip install PyQt6 requests pillow pyaudio
-```
+- 系统：Windows 10 / 11（全局热键依赖 Win32 API）
+- Python：3.8 及以上（推荐 3.10+）
 
-启动：
-```
+## 安装依赖
+
+1. （可选）创建并激活虚拟环境：
+   `powershell
+   cd C:\Users\LQ\Desktop\0920
+   python -m venv .venv
+   .venv\Scripts\activate
+   `
+2. 安装项目所需库：
+   `powershell
+   pip install -U pip
+   pip install PyQt6 requests pillow pyaudio
+   `
+
+## 从源码运行
+
+`powershell
+cd C:\Users\LQ\Desktop\0920
 python main.py
-```
+`
 
-## 快捷键
+首次运行会在 characters/、screenshots/ 下创建占位文件夹（使用 .gitkeep），右上角可开关语音功能并实时显示状态。
 
-| 快捷键       | 功能               |
-| ------------ | ------------------ |
-| Ctrl + 1     | 区域截图           |
-| Ctrl + 2     | 全屏截图并分析     |
-| Shift（切换）| 语音录音 开/关     |
+## 打包为 EXE
 
-说明：
-- Ctrl+1/Ctrl+2 全局热键可在任何程序前台触发；若系统占用或注册失败，窗口处于激活时仍可使用本地快捷键作为兜底。
-- Shift 录音切换仅在“语音功能开启”时生效。
+项目根目录提供 uild_exe.bat 脚本：
 
-## 注意事项
+- **保留控制台日志（推荐，便于排错）**
+  `powershell
+  cd C:\Users\LQ\Desktop\0920
+  .\build_exe.bat
+  `
+- **隐藏控制台（纯 GUI）**
+  `powershell
+  cd C:\Users\LQ\Desktop\0920
+  .\build_exe.bat gui
+  `
 
-- 请勿将包含密钥的 `config.json` 提交到公共仓库，可提供 `config.example.json` 示例。
-- 截图文件默认保存到 `screenshots/` 目录，并同时复制到剪贴板。
+脚本会自动：
+1. 自动寻找 Python（优先 py -3，失败回退 python）。
+2. 安装/更新 PyInstaller、PyQt6、requests、pillow、pyaudio。
+3. 清理旧的 uild/、dist/、.spec 文件。
+4. 执行 PyInstaller，并用 --add-data assets;assets 将图标与图片一并复制。
+
+打包完成后，可执行文件位于 dist\AI-Game-Strategist\AI-Game-Strategist.exe，同级的  ssets 文件夹保证图标正常显示。
+
+> 若希望生成 --onefile 单文件，可自行修改脚本中的 PyInstaller 命令；记得同步调整 
+esource_path() 以从 sys._MEIPASS 读取资源。
 
 ## 目录结构
 
-```
+`
 .
-├─ main.py                 # 主程序入口
-├─ snipping_tool.py        # 截图选择工具
-├─ api_service.py          # API 请求封装
-├─ audio_processing.py     # 录音/转写相关
-├─ assets/                 # 资源（图标、README图片）
-├─ screenshots/            # 截图输出目录
-└─ characters/             # 角色档案（Markdown）
-```
+├── main.py                # 主程序入口，负责 UI 与全局热键
+├── snipping_tool.py       # 自定义截图遮罩窗口
+├── api_service.py         # OCR / 多模态 / 语音 API 封装
+├── audio_processing.py    # 录音与转写逻辑
+├── assets/                # 图标与 README 插图
+├── characters/            # 角色档案（仅提交 .gitkeep）
+├── screenshots/           # 截图输出目录（仅提交 .gitkeep）
+├── build_exe.bat          # 一键打包脚本（仓库中唯一保留的 .bat）
+└── README.md              # 使用说明
+`
 
-如果该项目对你有帮助，欢迎 Star 支持！
+## 快捷键一览
+
+| 快捷键     | 功能说明                                 |
+|------------|------------------------------------------|
+| Ctrl+1   | 区域截图（全局可用，窗口激活时也保留）   |
+| Ctrl+2   | 全屏截图并进入分析流程                   |
+| Shift    | 切换语音录制状态（需开启语音功能）       |
+
+## 常见问题
+
+- **双击 EXE 后直接关闭**：请在 PowerShell 中运行 dist\AI-Game-Strategist\AI-Game-Strategist.exe，查看输出的错误信息。
+- **图标或资源丢失**：确认 dist\AI-Game-Strategist\assets 目录存在；打包脚本会自动复制。
+- **语音功能无响应**：检查麦克风权限，确认 pyaudio 安装成功。
+- **API 不生效**：在“API 设置”页补全必填字段并保存，config.json 已在 .gitignore 中忽略。
+
+## 版本控制说明
+
+- .gitignore 已忽略 uild/、dist/、各种日志以及除 uild_exe.bat 外的所有 .bat 文件。
+- 配置文件 config.json、个人笔记、运行时输出不会被提交。
+- characters/、screenshots/ 仅提交 .gitkeep，实际资料保留在本地。
+
+若后续扩展了新的 API 或工作流，欢迎同步更新 README.md 与 uild_exe.bat，保持打包流程简单可靠。祝使用愉快！

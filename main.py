@@ -8,6 +8,7 @@
 import sys
 import os
 import datetime
+from pathlib import Path
 import ctypes
 from ctypes import wintypes
 from PyQt6.QtWidgets import (
@@ -18,6 +19,13 @@ from PyQt6.QtWidgets import (
 )
 from PyQt6.QtCore import Qt, QRect, QTimer, QThread, pyqtSignal, QObject, QSize
 from PyQt6.QtGui import QFont, QPixmap, QClipboard, QAction, QKeySequence, QIcon, QShortcut
+
+BASE_DIR = Path(getattr(sys, "_MEIPASS", Path(__file__).resolve().parent))
+
+
+def resource_path(*relative_parts: str) -> str:
+    """Return absolute path for bundled assets (supports PyInstaller)."""
+    return str(BASE_DIR.joinpath(*relative_parts))
 
 # 启用高DPI缩放支持
 # 这会让应用能够正确感知到操作系统的显示缩放比例
@@ -944,7 +952,7 @@ class MainWindow(QMainWindow):
 
         # 截图按钮
         self.screenshot_button = QPushButton()
-        self.screenshot_button.setIcon(QIcon("assets/icons/screenshot.png"))
+        self.screenshot_button.setIcon(QIcon(resource_path("assets", "icons", "screenshot.png")))
         self.screenshot_button.setIconSize(QSize(20, 20))
         self.screenshot_button.setFixedSize(40, 30)
         self.screenshot_button.setShortcut("Ctrl+1")  # 恢复快捷键
@@ -979,7 +987,7 @@ class MainWindow(QMainWindow):
 
         # 语音开关按钮
         self.voice_toggle_button = QPushButton()
-        self.voice_toggle_button.setIcon(QIcon("assets/icons/microphone.png"))
+        self.voice_toggle_button.setIcon(QIcon(resource_path("assets", "icons", "microphone.png")))
         self.voice_toggle_button.setIconSize(QSize(20, 20))
         self.voice_toggle_button.setCheckable(True)
         self.voice_toggle_button.setFixedSize(40, 30)
@@ -2404,7 +2412,7 @@ def main():
     app = QApplication(sys.argv)
 
     # 设置应用程序图标
-    app.setWindowIcon(QIcon("assets/icons/app_icon.ico"))
+    app.setWindowIcon(QIcon(resource_path("assets", "icons", "app_icon.ico")))
 
     # 设置应用程序基本信息
     app.setApplicationName("互动游戏AI狗头军师")
