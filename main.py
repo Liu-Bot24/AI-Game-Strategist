@@ -8,6 +8,8 @@
 import sys
 import os
 import datetime
+import ctypes
+from ctypes import wintypes
 from PyQt6.QtWidgets import (
     QApplication, QMainWindow, QTabWidget, QWidget,
     QVBoxLayout, QHBoxLayout, QGridLayout, QLabel, QComboBox,
@@ -32,6 +34,111 @@ from api_service import get_text_from_image, load_api_config, save_api_config, g
 
 # 导入音频处理模块
 from audio_processing import AudioRecorder, STTWorker
+
+
+
+## 已移除低级键盘钩子实现，采用消息窗口+WM_HOTKEY 方案。
+class WinHotkeyWorker(QThread):
+    """基于隐藏消息窗口的 WM_HOTKEY 监听（推荐路径）。"""
+    hotkey = pyqtSignal(str)
+
+    def run(self):
+        user32 = ctypes.windll.user32
+        kernel32 = ctypes.windll.kernel32
+
+        WNDPROC = ctypes.WINFUNCTYPE(ctypes.c_longlong if ctypes.sizeof(ctypes.c_void_p)==8 else ctypes.c_long,
+                                     wintypes.HWND, wintypes.UINT, wintypes.WPARAM, wintypes.LPARAM)
+
+        self.WM_HOTKEY = 0x0312
+        self.MOD_CONTROL = 0x0002
+        self.VK_1 = 0x31
+        self.VK_2 = 0x32
+
+        class WNDCLASS(ctypes.Structure):
+            _fields_ = [("style", ctypes.c_uint),
+                        ("lpfnWndProc", ctypes.c_void_p),
+                        ("cbClsExtra", ctypes.c_int),
+                        ("cbWndExtra", ctypes.c_int),
+                        ("hInstance", wintypes.HINSTANCE),
+                        ("hIcon", ctypes.c_void_p),
+                        ("hCursor", ctypes.c_void_p),
+                        ("hbrBackground", ctypes.c_void_p),
+                        ("lpszMenuName", wintypes.LPCWSTR),
+                        ("lpszClassName", wintypes.LPCWSTR)]
+
+        self.hwnd = None
+
+        # 明确声明 DefWindowProcW 的签名，避免 64 位下参数溢出告警
+        LRESULT = ctypes.c_longlong if ctypes.sizeof(ctypes.c_void_p)==8 else ctypes.c_long
+        user32.DefWindowProcW.argtypes = [wintypes.HWND, wintypes.UINT, wintypes.WPARAM, wintypes.LPARAM]
+        user32.DefWindowProcW.restype = LRESULT
+
+        @WNDPROC
+        def _wnd_proc(hWnd, msg, wParam, lParam):
+            if msg == self.WM_HOTKEY:
+                hotkey_id = int(wParam)
+                if hotkey_id == 101:
+                    self.hotkey.emit("ctrl+1")
+                elif hotkey_id == 102:
+                    self.hotkey.emit("ctrl+2")
+                return 0
+            elif msg == 0x0002:  # WM_DESTROY
+                user32.PostQuitMessage(0)
+                return 0
+            return user32.DefWindowProcW(hWnd, msg, wParam, lParam)
+
+        hInstance = kernel32.GetModuleHandleW(None)
+        className = "QtHotkeyMsgWnd"
+
+        wndclass = WNDCLASS()
+        wndclass.style = 0
+        wndclass.lpfnWndProc = ctypes.cast(_wnd_proc, ctypes.c_void_p).value
+        wndclass.cbClsExtra = 0
+        wndclass.cbWndExtra = 0
+        wndclass.hInstance = hInstance
+        wndclass.hIcon = 0
+        wndclass.hCursor = 0
+        wndclass.hbrBackground = 0
+        wndclass.lpszMenuName = None
+        wndclass.lpszClassName = className
+
+        atom = user32.RegisterClassW(ctypes.byref(wndclass))
+        if not atom:
+            # 可能已注册，继续
+            pass
+
+        user32.CreateWindowExW.argtypes = [wintypes.DWORD, wintypes.LPCWSTR, wintypes.LPCWSTR,
+                                           wintypes.DWORD, ctypes.c_int, ctypes.c_int, ctypes.c_int, ctypes.c_int,
+                                           wintypes.HWND, ctypes.c_void_p, wintypes.HINSTANCE, ctypes.c_void_p]
+        user32.CreateWindowExW.restype = wintypes.HWND
+
+        self.hwnd = user32.CreateWindowExW(0, className, "", 0,
+                                           0, 0, 0, 0,
+                                           0, 0, hInstance, None)
+        if not self.hwnd:
+            print("消息窗口创建失败")
+            return
+
+        # 注册热键到此隐藏窗口
+        if not user32.RegisterHotKey(self.hwnd, 101, self.MOD_CONTROL, self.VK_1):
+            print("RegisterHotKey(hwnd, Ctrl+1) 失败")
+        if not user32.RegisterHotKey(self.hwnd, 102, self.MOD_CONTROL, self.VK_2):
+            print("RegisterHotKey(hwnd, Ctrl+2) 失败")
+
+        msg = wintypes.MSG()
+        while user32.GetMessageW(ctypes.byref(msg), 0, 0, 0) != 0:
+            user32.TranslateMessage(ctypes.byref(msg))
+            user32.DispatchMessageW(ctypes.byref(msg))
+
+        # 清理
+        user32.UnregisterHotKey(self.hwnd, 101)
+        user32.UnregisterHotKey(self.hwnd, 102)
+        user32.DestroyWindow(self.hwnd)
+        self.hwnd = None
+
+    def stop(self):
+        if hasattr(self, 'hwnd') and self.hwnd:
+            ctypes.windll.user32.PostMessageW(self.hwnd, 0x0010, 0, 0)  # WM_CLOSE
 
 
 class VoiceInputManager(QObject):
@@ -348,6 +455,8 @@ class MainWindow(QMainWindow):
 
     def __init__(self):
         super().__init__()
+        # 全局热键与截图重入控制
+        self.is_capturing = False
         # 定义常量
         self.NO_CHARACTER_NOTICE = "暂无角色档案"
 
@@ -380,9 +489,20 @@ class MainWindow(QMainWindow):
         # 加载配置到UI (必须在UI创建之后)
         self.load_api_config_to_ui()
 
+        # 初始化全局热键（Windows），保留原有局部快捷键作为备用
+        # 延迟到事件循环启动后注册，更稳定
+        QTimer.singleShot(0, self.setup_hotkeys)
+
     def closeEvent(self, event):
-        """窗口关闭时自动保存配置"""
+        """窗口关闭时自动保存配置并注销全局热键"""
         try:
+            # 停止消息窗口热键监听线程
+            if hasattr(self, 'hotkey_worker') and self.hotkey_worker and self.hotkey_worker.isRunning():
+                try:
+                    self.hotkey_worker.stop()
+                except Exception:
+                    pass
+                self.hotkey_worker.wait(300)
             # 保存当前的API配置
             self.save_api_config()
         except Exception as e:
@@ -390,6 +510,27 @@ class MainWindow(QMainWindow):
         finally:
             # 确保窗口正常关闭
             event.accept()
+
+    def setup_hotkeys(self):
+        """初始化全局热键（Windows），失败则继续使用窗口内快捷键。"""
+        if sys.platform != "win32":
+            print("非Windows平台，跳过全局热键。")
+            return
+        # 使用专用隐藏消息窗口监听 WM_HOTKEY（最稳定路径）
+        try:
+            self.hotkey_worker = WinHotkeyWorker()
+            self.hotkey_worker.hotkey.connect(self.on_hotkey_triggered)
+            self.hotkey_worker.start()
+            print("全局热键监听已启动 (消息窗口)")
+        except Exception as exc:
+            print(f"全局热键监听启动失败: {exc}")
+
+    def on_hotkey_triggered(self, hotkey_name: str):
+        print(f"全局热键触发: {hotkey_name}")
+        if hotkey_name == "ctrl+1":
+            self.start_smart_screenshot()
+        elif hotkey_name == "ctrl+2":
+            self.capture_fullscreen_and_analyze()
 
     def show_message(self, title: str, text: str, icon: str = "information"):
         """显示消息弹窗（白底黑字）
@@ -1939,6 +2080,9 @@ class MainWindow(QMainWindow):
 
     def start_smart_screenshot(self):
         """智能截图统一入口 - 根据当前标签页选择不同的分析模式"""
+        if self.is_capturing:
+            print("捕获已在进行中，忽略此次触发。")
+            return
         try:
             # 获取当前激活的标签页索引
             current_index = self.tab_widget.currentIndex()
@@ -1958,13 +2102,18 @@ class MainWindow(QMainWindow):
                 return
 
             # 记录目标后，执行原有的截图逻辑
+            self.is_capturing = True
             self.start_screenshot()
 
         except Exception as e:
+            self.is_capturing = False
             self.show_message("错误", f"启动截图功能时出错: {str(e)}", "critical")
 
     def capture_fullscreen_and_analyze(self):
         """捕获全屏并直接开始分析"""
+        if self.is_capturing:
+            print("捕获已在进行中，忽略此次触发。")
+            return
         try:
             current_index = self.tab_widget.currentIndex()
             if current_index == 0:
@@ -1980,11 +2129,14 @@ class MainWindow(QMainWindow):
 
             if full_pixmap.isNull():
                 print("全屏截图失败，获取的图像为空。")
+                self.is_capturing = False
                 return
 
+            self.is_capturing = True
             self.on_screenshot_completed(full_pixmap, screen.geometry())
 
         except Exception as e:
+            self.is_capturing = False
             self.show_message("错误", f"全屏截图时出错: {str(e)}", "critical")
 
     def start_screenshot(self):
@@ -2012,6 +2164,7 @@ class MainWindow(QMainWindow):
                 self.ocr_status_label.setText("❌ 截图失败")
                 self.ocr_status_label.setStyleSheet("color: #F44336; margin-left: 10px; margin-top: 10px;")
                 QTimer.singleShot(5000, lambda: self.ocr_status_label.setText(""))
+                self.is_capturing = False
                 return
 
             # 创建截图工具实例，传入捕获的图像
@@ -2034,9 +2187,11 @@ class MainWindow(QMainWindow):
             self.ocr_status_label.setText("❌ 截图错误")
             self.ocr_status_label.setStyleSheet("color: #F44336; margin-left: 10px; margin-top: 10px;")
             QTimer.singleShot(5000, lambda: self.ocr_status_label.setText(""))
+            self.is_capturing = False
 
     def on_screenshot_completed(self, pixmap: QPixmap, rect: QRect):
         """处理截图完成事件 - 智能分支版本"""
+        self.is_capturing = False
         # 先恢复主窗口显示
         self.setWindowState(Qt.WindowState.WindowNoState)
         self.show()
@@ -2183,6 +2338,7 @@ class MainWindow(QMainWindow):
 
     def on_screenshot_cancelled(self):
         """处理截图取消事件"""
+        self.is_capturing = False
         # 恢复主窗口显示
         self.setWindowState(Qt.WindowState.WindowNoState)
         self.show()
