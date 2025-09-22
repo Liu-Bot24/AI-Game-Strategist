@@ -41,21 +41,12 @@ API_PROVIDERS = {
 
 def get_text_from_image(api_key: str, endpoint: str, model: str, pixmap: QPixmap) -> str:
     """
-    使用多模态大模型API从图像中提取文字 (OpenAI格式)
-
-    Args:
-        api_key: API密钥
-        endpoint: API端点URL
-        model: 模型名称
-        pixmap: 要识别的图像
-
-    Returns:
-        str: 识别出的文字内容，失败时返回错误信息
+    使用多模态大模型API从图像中提取文字 (智能适配OpenAI格式和Gemini格式)
     """
     try:
-        # 步骤1: 将QPixmap转换为Base64字符串
-        buffer = BytesIO()
-        # QPixmap保存到BytesIO需要使用QBuffer
+        is_gemini = "googleapis.com" in endpoint
+
+        # 将QPixmap转换为Base64字符串
         from PyQt6.QtCore import QBuffer, QIODevice
         qbuffer = QBuffer()
         qbuffer.open(QIODevice.OpenModeFlag.WriteOnly)
@@ -63,70 +54,83 @@ def get_text_from_image(api_key: str, endpoint: str, model: str, pixmap: QPixmap
         image_data = qbuffer.data().data()
         base64_image = base64.b64encode(image_data).decode('utf-8')
 
-        # 步骤2: 构建"画面描述 + 文字提取"的专用Prompt
-        system_prompt = (
-            "你的任务是扮演一位专业的游戏场景分析师，精确地分析我提供的游戏截图。"
-            "请严格按照以下格式进行输出，缺一不可：\n\n"
-            "## 画面描述\n"
-            "[在这里用1-2句话，客观、精炼地描述画面中的核心内容。例如：在昏暗的审讯室里，一个身穿红衣的女人正低头沉思，对面的宦官打扮的男人表情严肃地看着她。]\n\n"
-            "## 对话内容\n"
-            "[在这里一字不差地、完整地提取出图片中所有的对话文本、旁白、系统提示或任何形式的文字内容。如果图片中没有任何文字，请在此处明确写出\"无对话文字\"。]"
-        )
+        if is_gemini:
+            # Gemini API的特殊处理
+            final_endpoint = f"{endpoint.replace('/openai/chat/completions', '')}/models/{model}:generateContent?key={api_key}"
+            headers = {"Content-Type": "application/json"}
 
-        # 步骤3: 构造请求体 (OpenAI格式)
-        request_body = {
-            "model": model,
-            "max_tokens": 1000,
-            "messages": [
-                {
-                    "role": "system",
-                    "content": system_prompt
-                },
-                {
-                    "role": "user",
-                    "content": [
-                        {
-                            "type": "text",
-                            "text": "请识别图片中的文字内容："
-                        },
-                        {
-                            "type": "image_url",
-                            "image_url": {
-                                "url": f"data:image/png;base64,{base64_image}"
-                            }
-                        }
-                    ]
-                }
-            ]
-        }
+            # 构建Gemini的多模态请求体
+            system_prompt = (
+                "你的任务是扮演一位专业的游戏场景分析师，精确地分析我提供的游戏截图。"
+                "请严格按照以下格式进行输出，缺一不可：\\n\\n"
+                "## 画面描述\\n"
+                "[在这里用1-2句话，客观、精炼地描述画面中的核心内容。例如：在昏暗的审讯室里，一个身穿红衣的女人正低头沉思，对面的宦官打扮的男人表情严肃地看着她。]\\n\\n"
+                "## 对话内容\\n"
+                "[在这里一字不差地、完整地提取出图片中所有的对话文本、旁白、系统提示或任何形式的文字内容。如果图片中没有任何文字，请在此处明确写出\"无对话文字\"。]"
+            )
+            request_body = {
+                "contents": [
+                    {
+                        "parts": [
+                            {"text": system_prompt},
+                            {"inline_data": {"mime_type": "image/png", "data": base64_image}}
+                        ]
+                    }
+                ]
+            }
 
-        # 步骤4: 构造请求头
-        headers = {
-            "Content-Type": "application/json",
-            "Authorization": f"Bearer {api_key}"
-        }
+        else:
+            # 标准OpenAI格式的处理
+            final_endpoint = endpoint
+            headers = {
+                "Content-Type": "application/json",
+                "Authorization": f"Bearer {api_key}"
+            }
+            system_prompt = (
+                "你的任务是扮演一位专业的游戏场景分析师，精确地分析我提供的游戏截图。"
+                "请严格按照以下格式进行输出，缺一不可：\\n\\n"
+                "## 画面描述\\n"
+                "[在这里用1-2句话，客观、精炼地描述画面中的核心内容。例如：在昏暗的审讯室里，一个身穿红衣的女人正低头沉思，对面的宦官打扮的男人表情严肃地看着她。]\\n\\n"
+                "## 对话内容\\n"
+                "[在这里一字不差地、完整地提取出图片中所有的对话文本、旁白、系统提示或任何形式的文字内容。如果图片中没有任何文字，请在此处明确写出\"无对话文字\"。]"
+            )
+            request_body = {
+                "model": model,
+                "max_tokens": 1000,
+                "messages": [
+                    {"role": "system", "content": system_prompt},
+                    {
+                        "role": "user",
+                        "content": [
+                            {"type": "text", "text": "请识别图片中的文字内容："},
+                            {"type": "image_url", "image_url": {"url": f"data:image/png;base64,{base64_image}"}}
+                        ]
+                    }
+                ]
+            }
 
-        # 步骤5: 发送HTTP请求
         response = requests.post(
-            endpoint,
+            final_endpoint,
             headers=headers,
             json=request_body,
-            timeout=30  # 30秒超时
+            timeout=30
         )
 
-        # 步骤6: 处理响应
         if response.status_code == 200:
             response_data = response.json()
-
-            # 解析OpenAI格式响应
-            if "choices" in response_data and len(response_data["choices"]) > 0:
-                message = response_data["choices"][0].get("message", {})
-                text_content = message.get("content", "")
-                return text_content.strip() if text_content else "未识别到文字"
+            if is_gemini:
+                # 解析Gemini的响应
+                candidates = response_data.get("candidates", [])
+                if candidates and "content" in candidates[0] and "parts" in candidates[0]["content"]:
+                    return candidates[0]["content"]["parts"][0].get("text", "未识别到文字")
+                return "Gemini API返回格式异常"
             else:
+                # 解析OpenAI的响应
+                if "choices" in response_data and len(response_data["choices"]) > 0:
+                    message = response_data["choices"][0].get("message", {})
+                    return message.get("content", "未识别到文字").strip()
                 return "API返回格式异常，未找到文字内容"
         else:
-            # API返回错误
             try:
                 error_data = response.json()
                 error_message = error_data.get("error", {}).get("message", "未知错误")
@@ -144,45 +148,59 @@ def get_text_from_image(api_key: str, endpoint: str, model: str, pixmap: QPixmap
 
 def send_chat_request(api_key: str, endpoint: str, model: str, messages: list, max_tokens: int = 2000) -> str:
     """
-    发送对话请求到对话模型API (OpenAI格式)
-
-    Args:
-        api_key: API密钥
-        endpoint: API端点URL
-        model: 模型名称
-        messages: 消息列表
-        max_tokens: 最大token数
-
-    Returns:
-        str: 模型回复内容，失败时返回错误信息
+    发送对话请求到对话模型API (智能适配OpenAI格式和Gemini格式)
     """
     try:
-        request_body = {
-            "model": model,
-            "max_tokens": max_tokens,
-            "messages": messages
-        }
+        # 判断是否为Gemini API
+        is_gemini = "googleapis.com" in endpoint
 
-        headers = {
-            "Content-Type": "application/json",
-            "Authorization": f"Bearer {api_key}"
-        }
+        if is_gemini:
+            # Gemini API的特殊处理
+            final_endpoint = f"{endpoint.replace('/openai/chat/completions', '')}/models/{model}:generateContent?key={api_key}"
+            headers = {"Content-Type": "application/json"}
+
+            # 将OpenAI格式的messages转换为Gemini格式的contents
+            gemini_contents = []
+            for msg in messages:
+                # 简单转换，只取user角色的content
+                if msg.get("role") == "user":
+                    gemini_contents.append({"parts": [{"text": msg.get("content", "")}]})
+
+            request_body = {"contents": gemini_contents}
+
+        else:
+            # 标准OpenAI格式的处理
+            final_endpoint = endpoint
+            headers = {
+                "Content-Type": "application/json",
+                "Authorization": f"Bearer {api_key}"
+            }
+            request_body = {
+                "model": model,
+                "max_tokens": max_tokens,
+                "messages": messages
+            }
 
         response = requests.post(
-            endpoint,
+            final_endpoint,
             headers=headers,
             json=request_body,
-            timeout=60  # 对话任务允许更长超时
+            timeout=60
         )
 
         if response.status_code == 200:
             response_data = response.json()
-
-            if "choices" in response_data and len(response_data["choices"]) > 0:
-                message = response_data["choices"][0].get("message", {})
-                text_content = message.get("content", "")
-                return text_content.strip() if text_content else "模型未返回有效内容"
+            if is_gemini:
+                # 解析Gemini的响应
+                candidates = response_data.get("candidates", [])
+                if candidates and "content" in candidates[0] and "parts" in candidates[0]["content"]:
+                    return candidates[0]["content"]["parts"][0].get("text", "模型未返回有效内容")
+                return "Gemini API返回格式异常"
             else:
+                # 解析OpenAI的响应
+                if "choices" in response_data and len(response_data["choices"]) > 0:
+                    message = response_data["choices"][0].get("message", {})
+                    return message.get("content", "模型未返回有效内容").strip()
                 return "API返回格式异常，未找到回复内容"
         else:
             try:
@@ -280,7 +298,7 @@ def test_api_connectivity(provider: str, api_key: str, api_endpoint: str, model_
     统一的API连接测试函数
 
     Args:
-        provider: API提供商名称 ("硅基流动", "豆包", "自定义")
+        provider: API提供商名称 ("硅基流动", "豆包", "Gemini", "自定义")
         api_key: API密钥
         api_endpoint: API端点URL
         model_name: 模型名称
@@ -290,6 +308,8 @@ def test_api_connectivity(provider: str, api_key: str, api_endpoint: str, model_
     """
     try:
         # 根据提供商构建不同的请求体和请求头
+        final_endpoint = api_endpoint  # 默认使用原始端点
+
         if provider == "硅基流动":
             # 硅基流动使用标准OpenAI格式
             headers = {
@@ -324,6 +344,18 @@ def test_api_connectivity(provider: str, api_key: str, api_endpoint: str, model_
                 ]
             }
 
+        elif provider == "Gemini":
+            # Gemini的API有特殊的URL和请求格式
+            # 密钥通过URL参数传递，模型名称是URL路径的一部分
+            final_endpoint = f"{api_endpoint.replace('/openai/chat/completions', '')}/models/{model_name}:generateContent?key={api_key}"
+            headers = {
+                "Content-Type": "application/json"
+            }
+            # 请求体结构也与OpenAI不同
+            test_body = {
+                "contents": [{"parts": [{"text": "Hello"}]}]
+            }
+
         elif provider == "自定义":
             # 自定义提供商默认使用OpenAI格式
             headers = {
@@ -346,7 +378,7 @@ def test_api_connectivity(provider: str, api_key: str, api_endpoint: str, model_
 
         # 发送测试请求
         response = requests.post(
-            api_endpoint,
+            final_endpoint,
             headers=headers,
             json=test_body,
             timeout=10
