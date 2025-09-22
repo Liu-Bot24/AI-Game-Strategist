@@ -33,6 +33,7 @@ screenshots/*
 config.json
 claude.md
 project_requirements.md
+风闻.md
 
 # Batch scripts (upload only build_exe)
 *.bat
