@@ -31,21 +31,21 @@
 ## 安装依赖
 
 1. （可选）创建并激活虚拟环境：
-   `powershell
+   ```powershell
    python -m venv .venv
    .\.venv\Scripts\activate
-   `
+   ```
 2. 安装项目所需库：
-   `powershell
+   ```powershell
    pip install -U pip
    pip install PyQt6 requests pillow pyaudio
-   `
+   ```
 
 ## 从源码运行
 
-`powershell
+```powershell
 python main.py
-`
+```
 
 首次运行会在 characters/、screenshots/ 下创建占位文件夹（使用 .gitkeep），界面右上角可开关语音功能并实时显示状态。
 
