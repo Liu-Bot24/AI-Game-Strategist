@@ -470,6 +470,8 @@ class MainWindow(QMainWindow):
         self.NO_CHARACTER_NOTICE = "暂无角色档案"
 
         self.init_directories()
+        self.RUMOR_LOG_FILE = str(BASE_DIR / "风闻.md")
+        self.is_viewing_rumors = False
         self.init_ui()
         self.load_character_list()
 
@@ -484,6 +486,9 @@ class MainWindow(QMainWindow):
 
         # 初始化对话工作线程
         self.chat_worker = None
+
+        # 风闻记录分析工作线程
+        self.rumor_worker = None
 
         # 加载API配置
         self.api_config = load_api_config()
@@ -912,6 +917,212 @@ class MainWindow(QMainWindow):
             self.record_status_label.setStyleSheet("color: #F44336; margin-left: 10px;")
             QTimer.singleShot(5000, lambda: self.record_status_label.setText(""))
 
+    def build_rumor_prompt(self, transcript_text: str, speakers: list, scene_attributes: list, dossier_entries: list) -> list:
+        """构建风闻记录分析的Prompt消息列表"""
+        speaker_list = "、".join(speakers) if speakers else "无"
+        attributes_text = "、".join(scene_attributes) if scene_attributes else "无"
+
+        if dossier_entries:
+            dossier_sections = []
+            for name, content in dossier_entries:
+                cleaned = content.strip() if content else "（档案内容为空）"
+                dossier_sections.append(f"### {name}\n{cleaned}")
+            dossier_text = "\n\n".join(dossier_sections)
+        else:
+            dossier_text = "暂无相关角色档案"
+
+        prompt_template = """# 身份与任务
+你是一位专业的剧情分析师和速记员。你的任务是根据我提供的【原始对话文本】、【场景关键信息】以及相关的【角色背景档案】，还原并整理出一段完整的游戏场景记录。你需要清晰地梳理出在场人员、谁说了什么，并总结事件的核心内容。
+**重要提醒**: 【原始对话文本】来自语音识别，可能包含少量错别字或不通顺与断句不合理之处。请结合【角色背景档案】和上下文，智能理解以及合理断句，并修正这些小瑕疵，还原出最合理的对话内容。
+
+
+---
+## 第一部分：原始对话文本 (来自语音识别)
+{transcript_text}
+
+---
+## 第二部分：场景关键信息
+*   **在场人员**: {speaker_list}
+
+---
+## 第三部分：相关角色背景档案
+{character_dossiers}
+
+---
+## 第四部分：场景属性
+ {scene_attributes}
+
+---
+## 第五部分：你的整理任务
+请严格按照以下格式，生成一份结构化的场景记录：
+
+1.  **【场景总结】**: 用一句话高度概括这个场景发生了什么事。
+2.  **【参与人员】**: 列出所有参与该场景的角色。
+3.  **【对话还原】**:
+    *   根据对话文本和你的推理，以“角色名：『对话内容』”的格式，尽可能还原对话。
+    *   注意，仔细思考和断句，根据语义和称谓等，辨别每一句话的说话人，避免出现错误的说话人归属。
+    *   对于“旁白”或“不明”身份的发言，也请照常记录。
+4.  **【情景分析】**: 结合角色档案，简要分析对话中可能存在的潜台词、人物情绪或重要信息点。
+5.  **【场景属性】**: 请根据场景属性输出一句话标记，"主角参与"和"偷听"并不代表字面行为，其中"主角参与"代表其他说话人知道主角（玩家角色）对谈话内容知情，"偷听"则表示他人不知道主角（玩家角色）知情。输出格式为:相关角色名1、相关角色名2……知道/不知道主角对此谈话知情。
+"""
+
+        filled_prompt = prompt_template.format(
+            transcript_text=transcript_text,
+            speaker_list=speaker_list,
+            scene_attributes=attributes_text,
+            character_dossiers=dossier_text
+        )
+
+        return [
+            {
+                "role": "user",
+                "content": filled_prompt
+            }
+        ]
+
+    def run_rumor_analysis(self):
+        """触发风闻记录的AI整理流程"""
+        try:
+            transcript_text = self.rumor_transcript_text.toPlainText().strip()
+            if not transcript_text:
+                self.rumor_status_label.setText("❌ 请先输入或录入对话内容")
+                self.rumor_status_label.setStyleSheet("color: #F44336; margin-left: 10px;")
+                QTimer.singleShot(3000, lambda: self.rumor_status_label.setText(""))
+                return
+
+            raw_speakers = []
+            for combo in getattr(self, 'rumor_speaker_combos', []):
+                current = combo.currentText().strip() if combo.currentText() else ""
+                if current and current not in ("无", self.NO_CHARACTER_NOTICE):
+                    raw_speakers.append(current)
+
+            selected_speakers = []
+            for name in raw_speakers:
+                if name not in selected_speakers:
+                    selected_speakers.append(name)
+
+            if not selected_speakers:
+                self.rumor_status_label.setText("❌ 请至少选择一位发言人")
+                self.rumor_status_label.setStyleSheet("color: #F44336; margin-left: 10px;")
+                QTimer.singleShot(3000, lambda: self.rumor_status_label.setText(""))
+                return
+
+            scene_attributes = []
+            if self.rumor_main_character_checkbox.isChecked():
+                scene_attributes.append("主角参与")
+            if self.rumor_eavesdrop_checkbox.isChecked():
+                scene_attributes.append("偷听")
+
+            dossier_entries = []
+            for speaker in selected_speakers:
+                if speaker in {"旁白", "不明"}:
+                    dossier_entries.append(
+                        (speaker, "（此身份无专属档案，用于描述旁白或身份不明的发言。）")
+                    )
+                    continue
+
+                file_path = os.path.join(self.characters_dir, f"{speaker}.md")
+                if os.path.exists(file_path):
+                    with open(file_path, 'r', encoding='utf-8') as file:
+                        content = file.read().strip()
+                    dossier_entries.append((speaker, content if content else "（档案内容为空）"))
+                else:
+                    dossier_entries.append((speaker, "（未找到对应档案，请补充角色背景。）"))
+
+            messages = self.build_rumor_prompt(transcript_text, selected_speakers, scene_attributes, dossier_entries)
+
+            chat_provider = self.api_config.get("chat_provider", "硅基流动")
+            provider_key = self.get_provider_key(chat_provider)
+            provider_config = self.api_config.get(provider_key, {})
+
+            api_key = provider_config.get("chat_api_key", "")
+            model = provider_config.get("chat_model", "")
+
+            if provider_key == "custom":
+                endpoint = provider_config.get("chat_endpoint", "")
+            elif chat_provider == "硅基流动":
+                endpoint = "https://api.siliconflow.cn/v1/chat/completions"
+            elif chat_provider == "豆包":
+                endpoint = "https://ark.cn-beijing.volces.com/api/v3/chat/completions"
+            elif chat_provider == "Gemini":
+                endpoint = "https://generativelanguage.googleapis.com/v1beta/openai/chat/completions"
+            else:
+                endpoint = ""
+
+            if not api_key or not endpoint or not model:
+                self.rumor_status_label.setText("❌ 对话API配置不完整")
+                self.rumor_status_label.setStyleSheet("color: #F44336; margin-left: 10px;")
+                QTimer.singleShot(4000, lambda: self.rumor_status_label.setText(""))
+                return
+
+            if self.rumor_worker and self.rumor_worker.isRunning():
+                self.rumor_worker.terminate()
+                self.rumor_worker.wait()
+
+            self.rumor_status_label.setText("🤖 AI整理中...")
+            self.rumor_status_label.setStyleSheet("color: #FF9800; margin-left: 10px;")
+            self.run_rumor_button.setText("处理中...")
+            self.run_rumor_button.setEnabled(False)
+            self.rumor_result_text.setPlainText("🤖 正在整理场景，请稍候...")
+
+            self.rumor_worker = ChatWorker(messages, api_key, endpoint, model)
+            self.rumor_worker.chat_completed.connect(self.on_rumor_analysis_completed)
+            self.rumor_worker.chat_failed.connect(self.on_rumor_analysis_failed)
+            self.rumor_worker.start()
+
+        except Exception as e:
+            self.on_rumor_analysis_failed(f"处理失败: {str(e)}")
+
+    def on_rumor_analysis_completed(self, analysis_result: str):
+        """风闻记录AI整理成功回调"""
+        self.run_rumor_button.setText("🤖 AI整理场景")
+        self.run_rumor_button.setEnabled(True)
+        self.rumor_status_label.setText("✅ 整理完成")
+        self.rumor_status_label.setStyleSheet("color: #4CAF50; margin-left: 10px;")
+        self.rumor_result_text.setPlainText(analysis_result)
+        QTimer.singleShot(4000, lambda: self.rumor_status_label.setText(""))
+
+    def on_rumor_analysis_failed(self, error_message: str):
+        """风闻记录AI整理失败回调"""
+        self.run_rumor_button.setText("🤖 AI整理场景")
+        self.run_rumor_button.setEnabled(True)
+        self.rumor_status_label.setText("❌ 整理失败")
+        self.rumor_status_label.setStyleSheet("color: #F44336; margin-left: 10px;")
+        self.rumor_result_text.setPlainText(f"❌ 整理失败：\n\n{error_message}")
+        QTimer.singleShot(5000, lambda: self.rumor_status_label.setText(""))
+
+    def record_rumor_to_file(self):
+        """将AI整理结果追加至风闻记录文件"""
+        try:
+            content = self.rumor_result_text.toPlainText().strip()
+
+            if not content:
+                self.rumor_record_status_label.setText("❌ 内容为空")
+                self.rumor_record_status_label.setStyleSheet("color: #F44336; margin-left: 10px;")
+                QTimer.singleShot(3000, lambda: self.rumor_record_status_label.setText(""))
+                return
+
+            if content.startswith("❌"):
+                self.rumor_record_status_label.setText("❌ 当前内容不可记录")
+                self.rumor_record_status_label.setStyleSheet("color: #F44336; margin-left: 10px;")
+                QTimer.singleShot(3000, lambda: self.rumor_record_status_label.setText(""))
+                return
+
+            timestamp = datetime.datetime.now().strftime("%Y-%m-%d %H:%M:%S")
+            entry = f"\n\n## 记录时间: {timestamp}\n\n{content}\n"
+            with open(self.RUMOR_LOG_FILE, 'a', encoding='utf-8') as file:
+                file.write(entry)
+
+            self.rumor_record_status_label.setText("✅ 已追加到风闻.md")
+            self.rumor_record_status_label.setStyleSheet("color: #4CAF50; margin-left: 10px;")
+            QTimer.singleShot(4000, lambda: self.rumor_record_status_label.setText(""))
+
+        except Exception as e:
+            self.rumor_record_status_label.setText("❌ 记录失败")
+            self.rumor_record_status_label.setStyleSheet("color: #F44336; margin-left: 10px;")
+            self.rumor_result_text.setPlainText(f"❌ 记录失败：\n\n{e}")
+            QTimer.singleShot(5000, lambda: self.rumor_record_status_label.setText(""))
+
     def init_directories(self):
         """初始化目录结构"""
         # 创建 characters 文件夹
@@ -939,8 +1150,9 @@ class MainWindow(QMainWindow):
         self.tab_widget = QTabWidget()
         main_layout.addWidget(self.tab_widget)
 
-        # 创建四个标签页
+        # 创建主要标签页
         self.create_quick_notes_tab()
+        self.create_rumor_log_tab()
         self.create_decision_assistance_tab()
         self.create_character_profiles_tab()
         self.create_api_settings_tab()
@@ -1141,6 +1353,112 @@ class MainWindow(QMainWindow):
         quick_notes_widget.setLayout(layout)
         self.tab_widget.addTab(quick_notes_widget, "速记与整理台")
 
+    def create_rumor_log_tab(self):
+        """创建风闻记录标签页"""
+        rumor_widget = QWidget()
+        layout = QVBoxLayout()
+
+        title_label = QLabel("风闻记录")
+        title_label.setFont(QFont("Microsoft YaHei", 16, QFont.Weight.Bold))
+        title_label.setAlignment(Qt.AlignmentFlag.AlignCenter)
+        layout.addWidget(title_label)
+
+        transcript_label = QLabel("🎙️ 语音转录原文")
+        transcript_label.setFont(QFont("Microsoft YaHei", 10, QFont.Weight.Bold))
+        transcript_label.setStyleSheet("color: #FF9800; margin-top: 10px;")
+        layout.addWidget(transcript_label)
+
+        self.rumor_transcript_text = QTextEdit()
+        self.rumor_transcript_text.setObjectName("rumor_transcript_text")
+        self.rumor_transcript_text.setPlaceholderText("语音识别的对话原文会显示在这里，可继续编辑补充关键信息...")
+        self.rumor_transcript_text.setMinimumHeight(140)
+        self.rumor_transcript_text.setStyleSheet("color: #F5F5F5; background-color: #2E2E2E; border: 1px solid #444444;")
+        layout.addWidget(self.rumor_transcript_text)
+
+        scene_info_label = QLabel("🧭 场景信息配置")
+        scene_info_label.setFont(QFont("Microsoft YaHei", 10, QFont.Weight.Bold))
+        scene_info_label.setStyleSheet("color: #4CAF50; margin-top: 12px;")
+        layout.addWidget(scene_info_label)
+
+        speakers_layout = QHBoxLayout()
+        self.rumor_speaker_combos = []
+        for idx in range(5):
+            speaker_layout = QVBoxLayout()
+            speaker_label = QLabel(f"发言人{idx + 1}")
+            speaker_label.setFont(QFont("Microsoft YaHei", 9, QFont.Weight.Bold))
+            speaker_label.setAlignment(Qt.AlignmentFlag.AlignLeft)
+
+            combo = QComboBox()
+            combo.setObjectName(f"rumor_speaker_combo_{idx + 1}")
+            combo.setSizeAdjustPolicy(QComboBox.SizeAdjustPolicy.AdjustToContents)
+            combo.setMinimumWidth(140)
+
+            speaker_layout.addWidget(speaker_label)
+            speaker_layout.addWidget(combo)
+            speakers_layout.addLayout(speaker_layout)
+            self.rumor_speaker_combos.append(combo)
+
+        speakers_layout.addStretch()
+        layout.addLayout(speakers_layout)
+
+        attributes_layout = QHBoxLayout()
+        self.rumor_main_character_checkbox = QCheckBox("主角参与")
+        self.rumor_main_character_checkbox.setFont(QFont("Microsoft YaHei", 9))
+        self.rumor_main_character_checkbox.setStyleSheet("color: #E0E0E0;")
+        self.rumor_eavesdrop_checkbox = QCheckBox("偷听")
+        self.rumor_eavesdrop_checkbox.setFont(QFont("Microsoft YaHei", 9))
+        self.rumor_eavesdrop_checkbox.setStyleSheet("color: #E0E0E0;")
+        attributes_layout.addWidget(self.rumor_main_character_checkbox)
+        attributes_layout.addWidget(self.rumor_eavesdrop_checkbox)
+        attributes_layout.addStretch()
+        layout.addLayout(attributes_layout)
+
+        action_layout = QHBoxLayout()
+        action_layout.addStretch()
+        self.run_rumor_button = QPushButton("🤖 AI整理场景")
+        self.run_rumor_button.setObjectName("run_rumor_button")
+        self.run_rumor_button.setMinimumHeight(36)
+        self.run_rumor_button.setFont(QFont("Microsoft YaHei", 10, QFont.Weight.Bold))
+        self.run_rumor_button.clicked.connect(self.run_rumor_analysis)
+        action_layout.addWidget(self.run_rumor_button)
+
+        self.rumor_status_label = QLabel("")
+        self.rumor_status_label.setFont(QFont("Microsoft YaHei", 9))
+        self.rumor_status_label.setStyleSheet("color: #888888; margin-left: 10px;")
+        action_layout.addWidget(self.rumor_status_label)
+        action_layout.addStretch()
+        layout.addLayout(action_layout)
+
+        result_label = QLabel("📘 AI分析结果")
+        result_label.setFont(QFont("Microsoft YaHei", 10, QFont.Weight.Bold))
+        result_label.setStyleSheet("color: #2196F3; margin-top: 12px;")
+        layout.addWidget(result_label)
+
+        self.rumor_result_text = QTextEdit()
+        self.rumor_result_text.setObjectName("rumor_result_text")
+        self.rumor_result_text.setPlaceholderText("AI整理后的场景摘要会显示在这里...")
+        self.rumor_result_text.setStyleSheet("color: #E0E0E0; background-color: #242424; border: 1px solid #444444;")
+        layout.addWidget(self.rumor_result_text)
+
+        record_layout = QHBoxLayout()
+        record_layout.addStretch()
+        self.record_rumor_button = QPushButton("📋 记录到风闻")
+        self.record_rumor_button.setObjectName("record_rumor_button")
+        self.record_rumor_button.setMinimumHeight(32)
+        self.record_rumor_button.setFont(QFont("Microsoft YaHei", 10, QFont.Weight.Bold))
+        self.record_rumor_button.clicked.connect(self.record_rumor_to_file)
+        record_layout.addWidget(self.record_rumor_button)
+
+        self.rumor_record_status_label = QLabel("")
+        self.rumor_record_status_label.setFont(QFont("Microsoft YaHei", 9))
+        self.rumor_record_status_label.setStyleSheet("color: #888888; margin-left: 10px;")
+        record_layout.addWidget(self.rumor_record_status_label)
+        record_layout.addStretch()
+        layout.addLayout(record_layout)
+
+        rumor_widget.setLayout(layout)
+        self.tab_widget.addTab(rumor_widget, "风闻记录")
+
     def create_decision_assistance_tab(self):
         """创建抉择辅助标签页"""
         decision_widget = QWidget()
@@ -1204,12 +1522,22 @@ class MainWindow(QMainWindow):
         self.include_all_chars_checkbox.setFont(QFont("Microsoft YaHei", 9))
         self.include_all_chars_checkbox.setStyleSheet("color: #9C27B0; margin-top: 10px;")
         self.include_all_chars_checkbox.stateChanged.connect(self.on_include_all_chars_toggled)
-        layout.addWidget(self.include_all_chars_checkbox)
+
+        self.include_rumors_checkbox = QCheckBox("参考风闻记录")
+        self.include_rumors_checkbox.setFont(QFont("Microsoft YaHei", 9))
+        self.include_rumors_checkbox.setStyleSheet("color: #FF9800; margin-top: 10px;")
+
+        checkbox_row = QHBoxLayout()
+        checkbox_row.addWidget(self.include_all_chars_checkbox)
+        checkbox_row.addSpacing(20)
+        checkbox_row.addWidget(self.include_rumors_checkbox)
+        checkbox_row.addStretch()
+        layout.addLayout(checkbox_row)
 
         # tokens消耗提醒
-        tokens_warning_label = QLabel("💡 勾选后将分析所有角色档案，会消耗更多tokens，请根据API配置的模型情况选择")
+        tokens_warning_label = QLabel("💡勾选后将分析所有角色档案/风闻记录，会消耗更多tokens，请根据API配置的模型情况选择")
         tokens_warning_label.setFont(QFont("Microsoft YaHei", 8))
-        tokens_warning_label.setStyleSheet("color: #FF5722; margin-left: 20px; margin-bottom: 5px;")
+        tokens_warning_label.setStyleSheet("color: #FF5722; margin-left: 6px; margin-bottom: 5px;")
         tokens_warning_label.setWordWrap(True)
         layout.addWidget(tokens_warning_label)
 
@@ -1337,9 +1665,20 @@ class MainWindow(QMainWindow):
                     character_profiles[related_person] = "档案内容为空"
 
             # 第三步：Prompt构建
+            rumor_content = ""
+            if hasattr(self, 'include_rumors_checkbox') and self.include_rumors_checkbox.isChecked():
+                if os.path.exists(self.RUMOR_LOG_FILE):
+                    try:
+                        with open(self.RUMOR_LOG_FILE, 'r', encoding='utf-8') as rumor_file:
+                            rumor_content = rumor_file.read().strip()
+                    except Exception as read_error:
+                        rumor_content = f"（读取风闻记录失败：{read_error}）"
+                else:
+                    rumor_content = "（暂无风闻记录）"
+
             messages = self.build_decision_prompt(
                 game_analysis, supplement, questioner,
-                related_characters, character_profiles
+                related_characters, character_profiles, rumor_content
             )
 
             # 第四步：检查对话API配置
@@ -1394,10 +1733,9 @@ class MainWindow(QMainWindow):
             self.get_advice_button.setText("🚀 获取抉择建议")
             self.get_advice_button.setEnabled(True)
 
-    def build_decision_prompt(self, game_analysis, supplement, questioner, related_characters, character_profiles):
+    def build_decision_prompt(self, game_analysis, supplement, questioner, related_characters, character_profiles, rumor_content):
         """构建游戏抉择建议的Prompt消息列表（最终战略版）"""
 
-        # 最终版Prompt模板，融合了需求文档的结构和用户最新的优化要求
         prompt_template = """# 身份与任务
 你是一位顶级的互动游戏剧情分析师与心理侧写专家。你的核心任务是基于我提供的全部信息，进行滴水不漏的逻辑推理，预测每个选项可能带来的短期和长期后果，并为我推荐一个最符合长远利益的最佳选项。
 **特别注意：** 以下"关键人物背景档案"是玩家在不同时间点记录的"印象笔记"，其中可能包含玩家主观的、甚至是前后矛盾的判断。记录中的时间戳（如有）非常关键，越晚的记录越能反映玩家当前的认知。你在分析时，必须像一位真正的侦探一样，考虑到这些记录的时效性和潜在的认知偏差，而不是将所有内容都当成绝对事实。
@@ -1415,11 +1753,15 @@ class MainWindow(QMainWindow):
 {questioner_dossier_content}
 {related_profiles_section}
 ---
-## 第三部分：我的补充说明
+## 第三部分：风闻记录 (历史事件回顾)
+这是我通过旁听或亲身经历记录下来的、过去发生的关键事件。这些记录对于理解当前人物关系和局势至关重要。
+{rumor_log_content}
+---
+## 第四部分：我的补充说明
 {additional_context_text}
 
 ---
-## 第四部分：你的分析任务
+## 第五部分：你的分析任务
 请严格按照以下结构进行分析和输出：
 
 1.  **当前局势分析**: 结合画面、提问者和相关人，一句话总结当前的核心矛盾或抉择点是什么。
@@ -1437,7 +1779,6 @@ class MainWindow(QMainWindow):
     * **推荐选项**: 我建议你选择 **【选项X】**。
     * **核心理由**: """
 
-        # 处理游戏情景分析部分
         if game_analysis and supplement:
             multimodal_result_text = f"{game_analysis}\n\n{supplement}"
         elif game_analysis:
@@ -1447,10 +1788,8 @@ class MainWindow(QMainWindow):
         else:
             multimodal_result_text = "（暂无具体画面分析）"
 
-        # 处理提问者档案
         questioner_dossier = character_profiles.get(questioner, "暂无此人的档案信息")
 
-        # 处理相关人档案部分
         related_profiles_section = ""
         if related_characters:
             related_profiles_section = "\n### 相关人物\n"
@@ -1460,19 +1799,18 @@ class MainWindow(QMainWindow):
         else:
             related_profiles_section = "\n### 相关人物\n暂无相关人物档案"
 
-        # 处理补充说明
         additional_context = supplement if supplement else "（暂无补充说明）"
+        rumor_section = rumor_content.strip() if rumor_content else "（暂无风闻记录）"
 
-        # 构建最终Prompt
         filled_prompt = prompt_template.format(
             multimodal_result_text=multimodal_result_text,
             questioner_name=questioner,
             questioner_dossier_content=questioner_dossier,
             related_profiles_section=related_profiles_section,
+            rumor_log_content=rumor_section,
             additional_context_text=additional_context
         )
 
-        # 构建消息列表
         messages = [
             {
                 "role": "user",
@@ -1546,6 +1884,11 @@ class MainWindow(QMainWindow):
         top_layout.addWidget(QLabel("选择角色:"))
         top_layout.addWidget(self.character_combo)
 
+        self.view_rumor_button = QPushButton("查看风闻记录")
+        self.view_rumor_button.setObjectName("view_rumor_button")
+        self.view_rumor_button.clicked.connect(self.toggle_rumor_view)
+        top_layout.addWidget(self.view_rumor_button)
+
         # 创建新角色按钮
         self.create_character_button = QPushButton("创建新角色")
         self.create_character_button.setObjectName("create_character_button")
@@ -1571,6 +1914,40 @@ class MainWindow(QMainWindow):
 
         character_widget.setLayout(layout)
         self.tab_widget.addTab(character_widget, "角色档案")
+
+    def toggle_rumor_view(self):
+        """在角色档案与风闻记录视图之间切换"""
+        try:
+            if not self.is_viewing_rumors:
+                if os.path.exists(self.RUMOR_LOG_FILE):
+                    try:
+                        with open(self.RUMOR_LOG_FILE, 'r', encoding='utf-8') as rumor_file:
+                            rumor_text = rumor_file.read().strip()
+                        rumor_text = rumor_text if rumor_text else "（风闻记录目前为空）"
+                    except Exception as read_error:
+                        rumor_text = f"读取风闻记录失败：{read_error}"
+                else:
+                    rumor_text = "（尚未创建风闻记录文件）"
+
+                self.dossier_text_edit.setPlainText(rumor_text)
+                self.dossier_text_edit.setReadOnly(True)
+                self.character_combo.setEnabled(False)
+                self.create_character_button.setEnabled(False)
+                self.save_dossier_button.setEnabled(False)
+                self.view_rumor_button.setText("返回角色档案")
+                self.is_viewing_rumors = True
+            else:
+                self.dossier_text_edit.setReadOnly(False)
+                self.character_combo.setEnabled(True)
+                self.create_character_button.setEnabled(True)
+                self.save_dossier_button.setEnabled(True)
+                self.view_rumor_button.setText("查看风闻记录")
+                self.is_viewing_rumors = False
+
+                current_character = self.character_combo.currentText()
+                self.on_character_changed(current_character)
+        except Exception as toggle_error:
+            self.show_message("风闻记录", f"切换风闻视图时出现问题：\n{toggle_error}", "warning")
 
     def create_api_settings_tab(self):
         """创建API设置标签页"""
@@ -1957,6 +2334,25 @@ class MainWindow(QMainWindow):
         """
         self.setStyleSheet(dark_style)
 
+    def update_rumor_speaker_options(self, character_names: list):
+        """更新风闻记录标签页的发言人下拉选项"""
+        if not hasattr(self, 'rumor_speaker_combos'):
+            return
+
+        base_options = ["无", "旁白", "不明"]
+        combined = base_options + character_names
+        seen = []
+        for option in combined:
+            if option not in seen:
+                seen.append(option)
+
+        for combo in self.rumor_speaker_combos:
+            combo.blockSignals(True)
+            combo.clear()
+            combo.addItems(seen)
+            combo.setCurrentText("无")
+            combo.blockSignals(False)
+
     def load_character_list(self):
         """加载角色列表"""
         self.character_combo.clear()
@@ -1999,8 +2395,11 @@ class MainWindow(QMainWindow):
                     self.related_person3_combo.clear()
                     self.related_person3_combo.addItems(related_options)
                     self.related_person3_combo.setCurrentText("无")
+
+                self.update_rumor_speaker_options(character_names)
             else:
                 self.character_combo.addItem(self.NO_CHARACTER_NOTICE)
+                self.update_rumor_speaker_options([])
                 if hasattr(self, 'record_character_combo'):
                     self.record_character_combo.clear()
                     # 无角色时只添加创建新角色选项，不添加"暂无角色档案"
@@ -2028,6 +2427,7 @@ class MainWindow(QMainWindow):
                     self.related_person3_combo.setCurrentText("无")
         else:
             self.character_combo.addItem(self.NO_CHARACTER_NOTICE)
+            self.update_rumor_speaker_options([])
             if hasattr(self, 'record_character_combo'):
                 self.record_character_combo.clear()
                 # 无角色时只添加创建新角色选项，不添加"暂无角色档案"
@@ -2202,13 +2602,12 @@ class MainWindow(QMainWindow):
             # 获取当前激活的标签页索引
             current_index = self.tab_widget.currentIndex()
 
-            # 根据索引设置截图目标
-            if current_index == 0:  # 速记台
+            current_tab = self.tab_widget.tabText(current_index)
+            if current_tab == "速记与整理台":
                 self.screenshot_target = "notes"
-            elif current_index == 1:  # 抉择辅助
+            elif current_tab == "抉择辅助":
                 self.screenshot_target = "decision"
             else:
-                # 其他标签页不支持截图功能
                 self.show_message(
                     "功能提示",
                     "截图功能仅在「速记与整理台」和「抉择辅助」标签页中可用。\n\n请切换到相应标签页后再使用截图功能。",
@@ -2231,9 +2630,10 @@ class MainWindow(QMainWindow):
             return
         try:
             current_index = self.tab_widget.currentIndex()
-            if current_index == 0:
+            current_tab = self.tab_widget.tabText(current_index)
+            if current_tab == "速记与整理台":
                 self.screenshot_target = "notes"
-            elif current_index == 1:
+            elif current_tab == "抉择辅助":
                 self.screenshot_target = "decision"
             else:
                 self.show_message("功能提示", "全屏截图功能仅在「速记与整理台」和「抉择辅助」标签页中可用。", "information")
